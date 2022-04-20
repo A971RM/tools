@@ -1,8 +1,8 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 import argparse
+import json
 import os
 
-import mmcv
 from PIL import Image
 
 
@@ -11,10 +11,12 @@ def parse_args():
         description='Convert images to coco format without annotations')
     parser.add_argument('img_path', help='The root path of images')
     parser.add_argument(
-        'classes', type=str, help='The text file name of storage class list')
+        'train_val', type=str, help='The train.json/val.json file name of storage categories list')
     parser.add_argument(
-        'out',
+        '--out',
+        dest='out',
         type=str,
+        default='test.json',
         help='The output annotation json file name, The save dir is in the '
         'same directory as img_path')
     parser.add_argument(
@@ -27,18 +29,31 @@ def parse_args():
     return args
 
 
-def collect_image_infos(path, exclude_extensions=None):
+def scandir_track_iter_progress(path, recursive = True):
+    """
+    返回所有扫描到的文件
+    :param path:
+    :param recursive:
+    :return:
+    """
+    normpath = os.path.normpath(path)
+    for dirpath, dirnames, filenames in os.walk(path):
+        if not recursive and os.path.normpath(dirpath) != normpath:
+            break
+        for filename in filenames:
+            yield os.path.join(dirpath, filename)
+
+
+def collect_image_infos(path, exclude_extensions=None, basename=True):
     img_infos = []
 
-    images_generator = mmcv.scandir(path, recursive=True)
-    for image_path in mmcv.track_iter_progress(list(images_generator)):
+    for image_path in scandir_track_iter_progress(path, recursive=True):
         if exclude_extensions is None or (
                 exclude_extensions is not None
                 and not image_path.lower().endswith(exclude_extensions)):
-            image_path = os.path.join(path, image_path)
             img_pillow = Image.open(image_path)
             img_info = {
-                'filename': image_path,
+                'filename': os.path.basename(image_path) if basename else image_path,
                 'width': img_pillow.width,
                 'height': img_pillow.height,
             }
@@ -46,21 +61,14 @@ def collect_image_infos(path, exclude_extensions=None):
     return img_infos
 
 
-def cvt_to_coco_json(img_infos, classes):
+def cvt_to_coco_json(img_infos, categories):
     image_id = 0
     coco = dict()
     coco['images'] = []
     coco['type'] = 'instance'
-    coco['categories'] = []
+    coco.update(categories)
     coco['annotations'] = []
     image_set = set()
-
-    for category_id, name in enumerate(classes):
-        category_item = dict()
-        category_item['supercategory'] = str('none')
-        category_item['id'] = int(category_id)
-        category_item['name'] = str(name)
-        coco['categories'].append(category_item)
 
     for img_dict in img_infos:
         file_name = img_dict['filename']
@@ -77,23 +85,34 @@ def cvt_to_coco_json(img_infos, classes):
     return coco
 
 
+def categories_from_file(train_val):
+    """
+    从train.json或者val.json中得到categories
+    :param train:
+    :return:
+    """
+    with open(train_val, 'rt', encoding='u8') as f:
+        train_val_json = json.load(f)
+    categories = train_val_json.get('categories', [])
+    return dict(categories=categories)
+
+
 def main():
     args = parse_args()
     assert args.out.endswith(
         'json'), 'The output file name must be json suffix'
 
     # 1 load image list info
-    img_infos = collect_image_infos(args.img_path, args.exclude_extensions)
+    img_infos = collect_image_infos(args.img_path, args.exclude_extensions, basename=True)
 
     # 2 convert to coco format data
-    classes = mmcv.list_from_file(args.classes)
-    coco_info = cvt_to_coco_json(img_infos, classes)
+    categories = categories_from_file(args.train_val)
+    coco_info = cvt_to_coco_json(img_infos, categories)
 
     # 3 dump
-    save_dir = os.path.join(args.img_path, '..', 'annotations')
-    mmcv.mkdir_or_exist(save_dir)
-    save_path = os.path.join(save_dir, args.out)
-    mmcv.dump(coco_info, save_path)
+    save_path = args.out
+    with open(save_path, 'wt') as f:
+        json.dump(coco_info, f)
     print(f'save json file: {save_path}')
 
 
